@@ -5,6 +5,7 @@ import uuid
 import folder_paths
 import comfy.utils
 import comfy.sd
+import urllib.parse
 
 class LoraLoader:
     def __init__(self):
@@ -35,19 +36,29 @@ class LoraLoader:
         
         # Check if lora_name is a URL
         if lora_name.startswith("http://") or lora_name.startswith("https://"):
-            # Download the external LoRA
-            unique_filename = str(uuid.uuid4()) + ".safetensors"
+            # Extract filename from URL
+            parsed_url = urllib.parse.urlparse(lora_name)
+            filename = os.path.basename(parsed_url.path)
+            if not filename:
+                filename = str(uuid.uuid4()) + ".safetensors"
+            
             destination_path = os.path.join(
-                folder_paths.get_folder_paths("loras")[0], unique_filename
+                folder_paths.get_folder_paths("loras")[0], filename
             )
-            print(f"Downloading external LoRA from {lora_name} to {destination_path}")
-            response = requests.get(
-                lora_name,
-                headers={"User-Agent": "Mozilla/5.0"},
-                allow_redirects=True,
-            )
-            with open(destination_path, "wb") as out_file:
-                out_file.write(response.content)
+            
+            # Check if file already exists
+            if not os.path.exists(destination_path):
+                print(f"Downloading external LoRA from {lora_name} to {destination_path}")
+                response = requests.get(
+                    lora_name,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    allow_redirects=True,
+                )
+                with open(destination_path, "wb") as out_file:
+                    out_file.write(response.content)
+            else:
+                print(f"LoRA file {filename} already exists, skipping download.")
+            
             lora_path = destination_path
         else:
             # Use the local LoRA file
