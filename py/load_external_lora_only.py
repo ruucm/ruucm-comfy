@@ -97,6 +97,8 @@ class LoadExternalLoraModelOnly(LoraLoader):
     DESCRIPTION = "Loads a LoRA model to modify only the diffusion model. Supports external URLs for downloading LoRAs."
 
     def load_lora_model_only(self, model, lora_name, strength_model):
+        if not lora_name.strip():  # Check if lora_name is empty or contains only whitespace
+            return (model,)  # Return the original model if no lora_name is provided
         return (self.load_lora(model, None, lora_name, strength_model, 0)[0],)
 
 NODE_CLASS_MAPPINGS = {
