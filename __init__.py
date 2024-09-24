@@ -3,9 +3,24 @@ import glob
 import os
 import sys
 from .ruucm import init, get_ext_dir
+from aiohttp import web
+import server
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
+
+
+
+print(f"🎾🎾Loading: Ruucm Comfy")
+workspace_path = os.path.join(os.path.dirname(__file__))
+
+dist_path = os.path.join(workspace_path, 'dist/workspace_web')
+if os.path.exists(dist_path):
+    server.PromptServer.instance.app.add_routes([
+        web.static('/workspace_web/', dist_path),
+    ])
+else:
+    print(f"🎾🎾🔴🔴Error: Web directory not found: {dist_path}")
 
 if init():
     py = get_ext_dir("py")
