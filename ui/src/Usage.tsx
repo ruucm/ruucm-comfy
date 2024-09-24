@@ -10,7 +10,7 @@ export const Usage = () => {
       const searchParams = new URLSearchParams(window.location.search);
       const machineName = searchParams.get("machineName");
       const modalSession = searchParams.get("modalSession");
-      const url = `https://ruucm-comfy-assets.vercel.app/machine-usage?machineName=${machineName}&modalSession=${modalSession}`;
+      const url = `https://ruucm-comfy-assets.vercel.app/api/machine-usage?machineName=${machineName}&modalSession=${modalSession}`;
 
       try {
         const response = await fetch(url);
