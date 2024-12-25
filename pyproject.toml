@@ -1,0 +1,15 @@
+[project]
+name = "ruucm-comfy"
+description = "Nodes: Load External LoRA Model Only"
+version = "1.0.0"
+license = {file = "LICENSE"}
+dependencies = ["torch", "fastapi==0.108.0"]
+
+[project.urls]
+Repository = "https://github.com/ruucm/ruucm-comfy"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "ruucm-comfy"
+Icon = ""
