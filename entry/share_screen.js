@@ -649,7 +649,7 @@ app.registerExtension({
 
           Object.assign(this.parentEl.style, {
             transformOrigin: "0 0",
-            transform: transform,
+            // transform: transform,
             left: 0,
             top: 0,
             cursor: "pointer",
@@ -660,7 +660,8 @@ app.registerExtension({
 
           this.computedHeight = this.parentEl.getBoundingClientRect().height;
         },
-        computedHeight: 250,
+        // computedHeight: 250,
+        computedHeight: 0,
         computeSize: function (width) {
           return [width, this.computedHeight];
         },
