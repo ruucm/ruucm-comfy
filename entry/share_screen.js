@@ -534,6 +534,7 @@ app.registerExtension({
   async getCustomWidgets(app) {
     return {
       BASE64(node, inputName, inputData, app) {
+        console.log('BASE64', node, inputName, inputData, app);
         const widget = {
           type: inputData[0],
           name: inputName,
@@ -710,7 +711,7 @@ app.registerExtension({
 
       previewWidget.parentEl.appendChild(previewWidget.videoEl);
       previewWidget.parentEl.appendChild(previewWidget.areaEl);
-      document.body.appendChild(previewWidget.parentEl);
+      // document.body.appendChild(previewWidget.parentEl);
 
       this.serialize_widgets = true;
     };
