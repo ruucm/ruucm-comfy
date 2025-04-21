@@ -8,6 +8,12 @@ Load external lora by URL.
 
 Tested with Flux Dev model.
 
+### Share Screen
+
+Share screen with ComfyUI.
+
+Base codes from [ComfyUI_zfkun](https://github.com/zfkun/ComfyUI_zfkun).
+
 ## Dev
 
 1. Clone ComfyUI
