@@ -1,2 +1,4 @@
 torch
 fastapi==0.108.0
+insightface
+onnxruntime-gpu
