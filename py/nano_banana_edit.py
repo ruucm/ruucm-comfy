@@ -1,10 +1,15 @@
 import base64
 import io
 import json
+import os
 import urllib.request
+from datetime import datetime
 import numpy as np
 import torch
 from PIL import Image, ImageFilter
+
+# Debug output directory (inside this custom node package)
+_DEBUG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug_output")
 
 MODELS = {
     "Nano Banana 2 (Flash)": "gemini-3.1-flash-image-preview",
@@ -176,7 +181,7 @@ def _insightface_compare_gaze(source_pil, target_pil, gaze_threshold, debug_line
     return needs_edit, target_desc
 
 
-def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines):
+def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix=""):
     """
     Use Gemini text model to compare gaze direction between two images.
     Returns (needs_edit: bool, target_gaze_desc: str)
@@ -228,7 +233,8 @@ def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines):
             if "text" in part:
                 text += part["text"]
 
-    debug_lines.append(f"detect_mode: gemini ({COMPARE_MODEL})")
+    tag = f"{prefix}detect_mode" if prefix else "detect_mode"
+    debug_lines.append(f"{tag}: gemini ({COMPARE_MODEL})")
 
     try:
         clean = text.strip()
@@ -242,18 +248,18 @@ def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines):
         same_dir = parsed.get("same_direction", True)
         explanation = parsed.get("explanation", "")
 
-        debug_lines.append(f"source_gaze: {source_gaze}")
-        debug_lines.append(f"target_gaze: {target_gaze}")
-        debug_lines.append(f"same_direction: {same_dir}")
-        debug_lines.append(f"explanation: {explanation}")
-        debug_lines.append(f"needs_edit: {not same_dir}")
+        debug_lines.append(f"{prefix}source_gaze: {source_gaze}")
+        debug_lines.append(f"{prefix}target_gaze: {target_gaze}")
+        debug_lines.append(f"{prefix}same_direction: {same_dir}")
+        debug_lines.append(f"{prefix}explanation: {explanation}")
+        debug_lines.append(f"{prefix}needs_edit: {not same_dir}")
 
         return not same_dir, target_gaze
     except (json.JSONDecodeError, KeyError) as e:
         print(f"[NanoBananaEdit] Failed to parse compare response: {text}")
-        debug_lines.append(f"raw_response: {text[:200]}")
-        debug_lines.append(f"parse_error: {e}")
-        debug_lines.append("needs_edit: True (fallback)")
+        debug_lines.append(f"{prefix}raw_response: {text[:200]}")
+        debug_lines.append(f"{prefix}parse_error: {e}")
+        debug_lines.append(f"{prefix}needs_edit: True (fallback)")
         return True, "unknown"
 
 
@@ -351,6 +357,17 @@ class NanoBananaEdit:
                     "step": 0.01,
                     "tooltip": "Minimum gaze difference to trigger edit. Only used in insightface detect_mode.",
                 }),
+                "max_retries": ("INT", {
+                    "default": 2,
+                    "min": 1,
+                    "max": 5,
+                    "step": 1,
+                    "tooltip": "Max edit attempts. After each edit, gaze is verified. If worse, retries from scratch. Only used with target_image.",
+                }),
+                "save_debug": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Save intermediate images and debug info to ruucm-comfy/debug_output/",
+                }),
             },
             "optional": {
                 "target_image": ("IMAGE", {
@@ -375,53 +392,8 @@ class NanoBananaEdit:
         "In 'eyes_only' mode, only the eye region is composited onto the original."
     )
 
-    def edit(self, image, api_key, model, output_quality, composite_mode, blend_radius,
-             detect_mode, gaze_threshold, target_image=None, prompt=""):
-        if not api_key.strip():
-            raise ValueError("API key is required. Get one from aistudio.google.com")
-
-        pil_img = _tensor_to_pil(image)
-        original_size = pil_img.size
-        debug_lines = []
-
-        # Auto-generate prompt from target_image gaze
-        if target_image is not None:
-            target_pil = _tensor_to_pil(target_image)
-
-            if detect_mode == "gemini":
-                needs_edit, target_gaze_desc = _gemini_compare_gaze(
-                    pil_img, target_pil, api_key, debug_lines
-                )
-            else:
-                needs_edit, target_gaze_desc = _insightface_compare_gaze(
-                    pil_img, target_pil, gaze_threshold, debug_lines
-                )
-
-            if not needs_edit:
-                final_prompt = "(skipped - gaze already matches)"
-                debug_lines.append("action: SKIPPED")
-                debug_info = "\n".join(debug_lines)
-                print(f"[NanoBananaEdit] {debug_info}")
-                return (_pil_to_tensor(pil_img), final_prompt, debug_info,)
-
-            final_prompt = (
-                f"Edit only the eyes in this photo so that both pupils look {target_gaze_desc}. "
-                f"Do NOT change anything else - keep the face, hair, skin, clothing, "
-                f"background, lighting, and all other details exactly the same. "
-                f"Only adjust the iris/pupil position."
-            )
-            debug_lines.append("action: API CALL")
-            print(f"[NanoBananaEdit] Auto prompt: {final_prompt}")
-        elif prompt.strip():
-            final_prompt = prompt
-            debug_lines.append("mode: manual prompt")
-        else:
-            final_prompt = (
-                "Edit only the eyes so that both pupils look directly at the camera. "
-                "Keep everything else exactly the same."
-            )
-            debug_lines.append("mode: default prompt (no target_image)")
-
+    def _call_nano_banana(self, pil_img, final_prompt, model):
+        """Call Nano Banana API and return result PIL image or None."""
         img_b64 = _pil_to_base64_full(pil_img)
         model_id = MODELS[model]
 
@@ -437,7 +409,7 @@ class NanoBananaEdit:
             },
         }
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={self._api_key}"
 
         req = urllib.request.Request(
             url,
@@ -450,7 +422,6 @@ class NanoBananaEdit:
         resp = urllib.request.urlopen(req, timeout=180)
         result = json.loads(resp.read())
 
-        # Extract image from response
         result_pil = None
         for candidate in result.get("candidates", []):
             for part in candidate.get("content", {}).get("parts", []):
@@ -460,19 +431,141 @@ class NanoBananaEdit:
                 elif "text" in part:
                     print(f"[NanoBananaEdit] Response: {part['text']}")
 
-        if result_pil is None:
-            raise RuntimeError(
-                f"No image in API response. "
-                f"Response: {json.dumps(result, indent=2)[:500]}"
+        return result_pil
+
+    def _save_debug(self, name, pil_img=None, text=None):
+        """Save debug image or text to debug_output/ folder."""
+        if not self._save_debug_enabled:
+            return
+        os.makedirs(self._debug_session_dir, exist_ok=True)
+        if pil_img is not None:
+            path = os.path.join(self._debug_session_dir, f"{name}.png")
+            pil_img.save(path)
+            print(f"[NanoBananaEdit] Debug saved: {path}")
+        if text is not None:
+            path = os.path.join(self._debug_session_dir, f"{name}.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def edit(self, image, api_key, model, output_quality, composite_mode, blend_radius,
+             detect_mode, gaze_threshold, max_retries, save_debug, target_image=None, prompt=""):
+        if not api_key.strip():
+            raise ValueError("API key is required. Get one from aistudio.google.com")
+
+        self._api_key = api_key
+        self._save_debug_enabled = save_debug
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._debug_session_dir = os.path.join(_DEBUG_DIR, timestamp)
+
+        pil_img = _tensor_to_pil(image)
+        original_size = pil_img.size
+        debug_lines = []
+
+        self._save_debug("00_input", pil_img)
+
+        # Auto-generate prompt from target_image gaze
+        if target_image is not None:
+            target_pil = _tensor_to_pil(target_image)
+            self._save_debug("00_target", target_pil)
+
+            # Pre-edit comparison
+            debug_lines.append("--- PRE-EDIT COMPARISON ---")
+            if detect_mode == "gemini":
+                needs_edit, target_gaze_desc = _gemini_compare_gaze(
+                    pil_img, target_pil, api_key, debug_lines
+                )
+            else:
+                needs_edit, target_gaze_desc = _insightface_compare_gaze(
+                    pil_img, target_pil, gaze_threshold, debug_lines
+                )
+
+            if not needs_edit:
+                final_prompt = "(skipped - gaze already matches)"
+                debug_lines.append("action: SKIPPED")
+                debug_info = "\n".join(debug_lines)
+                self._save_debug("debug_info", text=debug_info)
+                print(f"[NanoBananaEdit] {debug_info}")
+                return (_pil_to_tensor(pil_img), final_prompt, debug_info,)
+
+            final_prompt = (
+                f"Edit only the eyes in this photo so that both pupils look {target_gaze_desc}. "
+                f"Do NOT change anything else - keep the face, hair, skin, clothing, "
+                f"background, lighting, and all other details exactly the same. "
+                f"Only adjust the iris/pupil position."
             )
 
-        # Match original size
-        if result_pil.size != original_size:
-            result_pil = result_pil.resize(original_size, Image.LANCZOS)
+            # Edit + verify loop
+            best_result = None
+            for attempt in range(1, max_retries + 1):
+                debug_lines.append(f"--- ATTEMPT {attempt}/{max_retries} ---")
+                debug_lines.append(f"action: API CALL")
+                print(f"[NanoBananaEdit] Attempt {attempt}/{max_retries}...")
 
-        # Eyes-only compositing
-        if composite_mode == "eyes_only":
-            result_pil = _composite_eyes(pil_img, result_pil, blur_radius=blend_radius)
+                result_pil = self._call_nano_banana(pil_img, final_prompt, model)
+                if result_pil is None:
+                    debug_lines.append(f"attempt_{attempt}: NO IMAGE RETURNED")
+                    continue
+
+                if result_pil.size != original_size:
+                    result_pil = result_pil.resize(original_size, Image.LANCZOS)
+
+                self._save_debug(f"{attempt:02d}_raw_edit", result_pil)
+
+                # Composite eyes if needed
+                if composite_mode == "eyes_only":
+                    result_pil = _composite_eyes(pil_img, result_pil, blur_radius=blend_radius)
+                    self._save_debug(f"{attempt:02d}_composited", result_pil)
+
+                # Post-edit verification: is the result closer to target?
+                debug_lines.append(f"--- POST-EDIT VERIFY (attempt {attempt}) ---")
+                if detect_mode == "gemini":
+                    still_needs_edit, _ = _gemini_compare_gaze(
+                        result_pil, target_pil, api_key, debug_lines, prefix=f"verify_{attempt}_"
+                    )
+                else:
+                    still_needs_edit, _ = _insightface_compare_gaze(
+                        result_pil, target_pil, gaze_threshold, debug_lines
+                    )
+
+                if not still_needs_edit:
+                    # Verified: result matches target
+                    debug_lines.append(f"attempt_{attempt}: VERIFIED OK")
+                    best_result = result_pil
+                    break
+                else:
+                    debug_lines.append(f"attempt_{attempt}: STILL DIFFERENT, retrying...")
+                    # Keep first attempt as fallback
+                    if best_result is None:
+                        best_result = result_pil
+
+            if best_result is None:
+                # All attempts failed to produce an image, return original
+                debug_lines.append("all attempts failed, returning original")
+                best_result = pil_img
+
+            result_pil = best_result
+
+        else:
+            # Manual prompt mode - no verification loop
+            if prompt.strip():
+                final_prompt = prompt
+                debug_lines.append("mode: manual prompt")
+            else:
+                final_prompt = (
+                    "Edit only the eyes so that both pupils look directly at the camera. "
+                    "Keep everything else exactly the same."
+                )
+                debug_lines.append("mode: default prompt (no target_image)")
+
+            result_pil = self._call_nano_banana(pil_img, final_prompt, model)
+            if result_pil is None:
+                raise RuntimeError("No image in API response.")
+
+            if result_pil.size != original_size:
+                result_pil = result_pil.resize(original_size, Image.LANCZOS)
+
+            if composite_mode == "eyes_only":
+                result_pil = _composite_eyes(pil_img, result_pil, blur_radius=blend_radius)
 
         # Handle output quality / resolution
         target_size = QUALITY_OPTIONS.get(output_quality)
@@ -486,9 +579,11 @@ class NanoBananaEdit:
                 new_w = int(w * target_size / h)
             result_pil = result_pil.resize((new_w, new_h), Image.LANCZOS)
 
-        debug_lines.append(f"edit_model: {model_id}")
+        debug_lines.append(f"edit_model: {MODELS[model]}")
         debug_lines.append(f"output_size: {result_pil.size}")
         debug_info = "\n".join(debug_lines)
+        self._save_debug("99_final", result_pil)
+        self._save_debug("debug_info", text=debug_info)
         print(f"[NanoBananaEdit] {debug_info}")
         return (_pil_to_tensor(result_pil), final_prompt, debug_info,)
 
