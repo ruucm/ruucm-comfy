@@ -318,52 +318,80 @@ def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix=""
         return True, "unknown"
 
 
-def _composite_eyes(original_pil, edited_pil, blur_radius=30):
-    """Detect eye region on original, paste only that region from edited."""
+def _crop_face_for_edit(pil_image):
+    """
+    Crop the face/eye region for Nano Banana editing.
+    Returns (cropped_pil, (x1, y1, x2, y2)) or (original, None) if detection fails.
+    Uses a generous square-ish crop so Nano Banana has enough context.
+    """
     import cv2
 
     app = _get_face_app()
-    img_cv2 = cv2.cvtColor(np.array(original_pil), cv2.COLOR_RGB2BGR)
+    img_cv2 = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
     faces = app.get(img_cv2)
 
     if not faces:
-        print("[NanoBananaEdit] No face detected, returning full edit")
-        return edited_pil
+        print("[NanoBananaEdit] No face detected for crop, using full image")
+        return pil_image, None
 
     face = faces[0]
     lm = face.landmark_2d_106
-    w, h = original_pil.size
+    w, h = pil_image.size
 
     left_eye_pts = lm[33:43]
     right_eye_pts = lm[87:97]
     all_eye_pts = np.vstack([left_eye_pts, right_eye_pts])
-
     x_min, y_min = all_eye_pts.min(axis=0)
     x_max, y_max = all_eye_pts.max(axis=0)
 
-    pad_x = (x_max - x_min) * 0.4
-    pad_y = (y_max - y_min) * 0.8
-    x_min = max(0, int(x_min - pad_x))
-    y_min = max(0, int(y_min - pad_y))
-    x_max = min(w, int(x_max + pad_x))
-    y_max = min(h, int(y_max + pad_y))
-
-    mask_np = np.zeros((h, w), dtype=np.uint8)
-    cy = (y_min + y_max) / 2
+    # Square-ish crop centered on eyes
+    eye_w = x_max - x_min
+    eye_h = y_max - y_min
     cx = (x_min + x_max) / 2
-    ry = (y_max - y_min) / 2
-    rx = (x_max - x_min) / 2
+    cy = (y_min + y_max) / 2
+    size = max(eye_w, eye_h) * 2.5
+    half = size / 2
 
-    Y, X = np.ogrid[:h, :w]
-    ellipse = ((X - cx) / rx) ** 2 + ((Y - cy) / ry) ** 2
-    mask_np[ellipse <= 1.0] = 255
+    crop_x1 = max(0, int(cx - half * 1.2))
+    crop_y1 = max(0, int(cy - half))
+    crop_x2 = min(w, int(cx + half * 1.2))
+    crop_y2 = min(h, int(cy + half))
 
-    mask = Image.fromarray(mask_np)
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    crop = pil_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+    print(f"[NanoBananaEdit] Face crop: ({crop_x1},{crop_y1})->({crop_x2},{crop_y2}), size={crop.size}")
+    return crop, (crop_x1, crop_y1, crop_x2, crop_y2)
 
-    result = Image.composite(edited_pil, original_pil, mask)
-    print(f"[NanoBananaEdit] Eyes composited: region ({x_min},{y_min})->({x_max},{y_max})")
-    return result
+
+def _paste_crop_back(original_pil, edited_crop, crop_coords, blur_radius=30):
+    """
+    Paste edited crop back onto original using an elliptical soft mask.
+    Returns composited PIL image.
+    """
+    x1, y1, x2, y2 = crop_coords
+    crop_w, crop_h = x2 - x1, y2 - y1
+
+    # Resize edited crop to match original crop size
+    edited_crop = edited_crop.resize((crop_w, crop_h), Image.LANCZOS)
+
+    # Create elliptical soft mask
+    mask_np = np.zeros((crop_h, crop_w), dtype=np.float32)
+    cy_m, cx_m = crop_h / 2, crop_w / 2
+    ry, rx = crop_h * 0.35, crop_w * 0.35
+
+    Y, X = np.ogrid[:crop_h, :crop_w]
+    dist = ((X - cx_m) / rx) ** 2 + ((Y - cy_m) / ry) ** 2
+    mask_np[dist <= 1.0] = 255.0
+    # Soft falloff zone
+    falloff = (dist > 1.0) & (dist < 1.8)
+    mask_np[falloff] = 255.0 * (1.0 - (dist[falloff] - 1.0) / 0.8)
+
+    mask = Image.fromarray(mask_np.clip(0, 255).astype(np.uint8), 'L')
+    mask = mask.filter(ImageFilter.GaussianBlur(blur_radius))
+
+    result = original_pil.copy()
+    result.paste(edited_crop, (x1, y1), mask)
+    print(f"[NanoBananaEdit] Crop pasted back at ({x1},{y1}) with elliptical mask")
+    return result, mask
 
 
 class NanoBananaEdit:
@@ -557,6 +585,12 @@ class NanoBananaEdit:
                 f"Only adjust the iris/pupil position."
             )
 
+            # Crop face region for editing (send only eyes area to Nano Banana)
+            face_crop, crop_coords = _crop_face_for_edit(pil_img)
+            self._save_debug("00_face_crop", face_crop)
+            if crop_coords:
+                debug_lines.append(f"face_crop: ({crop_coords[0]},{crop_coords[1]})->({crop_coords[2]},{crop_coords[3]}), size={face_crop.size}")
+
             # Edit + verify loop
             best_result = None
             for attempt in range(1, max_retries + 1):
@@ -564,19 +598,24 @@ class NanoBananaEdit:
                 debug_lines.append(f"action: API CALL")
                 print(f"[NanoBananaEdit] Attempt {attempt}/{max_retries}...")
 
-                result_pil = self._call_nano_banana(pil_img, final_prompt, model)
-                if result_pil is None:
+                # Send only the face crop to Nano Banana
+                edited_crop = self._call_nano_banana(face_crop, final_prompt, model)
+                if edited_crop is None:
                     debug_lines.append(f"attempt_{attempt}: NO IMAGE RETURNED")
                     continue
 
-                if result_pil.size != original_size:
-                    result_pil = result_pil.resize(original_size, Image.LANCZOS)
+                self._save_debug(f"{attempt:02d}_edited_crop", edited_crop)
 
-                self._save_debug(f"{attempt:02d}_raw_edit", result_pil)
-
-                # Composite eyes if needed
-                if composite_mode == "eyes_only":
-                    result_pil = _composite_eyes(pil_img, result_pil, blur_radius=blend_radius)
+                # Paste edited crop back onto original
+                if crop_coords:
+                    result_pil, mask = _paste_crop_back(pil_img, edited_crop, crop_coords, blur_radius=blend_radius)
+                    self._save_debug(f"{attempt:02d}_mask", mask)
+                    self._save_debug(f"{attempt:02d}_composited", result_pil)
+                else:
+                    # No face detected, use full edit
+                    result_pil = edited_crop
+                    if result_pil.size != original_size:
+                        result_pil = result_pil.resize(original_size, Image.LANCZOS)
                     self._save_debug(f"{attempt:02d}_composited", result_pil)
 
                 # Post-edit verification: is the result closer to target?
@@ -593,18 +632,15 @@ class NanoBananaEdit:
                     )
 
                 if not still_needs_edit:
-                    # Verified: result matches target
                     debug_lines.append(f"attempt_{attempt}: VERIFIED OK")
                     best_result = result_pil
                     break
                 else:
                     debug_lines.append(f"attempt_{attempt}: STILL DIFFERENT, retrying...")
-                    # Keep first attempt as fallback
                     if best_result is None:
                         best_result = result_pil
 
             if best_result is None:
-                # All attempts failed to produce an image, return original
                 debug_lines.append("all attempts failed, returning original")
                 best_result = pil_img
 
@@ -622,15 +658,32 @@ class NanoBananaEdit:
                 )
                 debug_lines.append("mode: default prompt (no target_image)")
 
-            result_pil = self._call_nano_banana(pil_img, final_prompt, model)
-            if result_pil is None:
-                raise RuntimeError("No image in API response.")
-
-            if result_pil.size != original_size:
-                result_pil = result_pil.resize(original_size, Image.LANCZOS)
-
             if composite_mode == "eyes_only":
-                result_pil = _composite_eyes(pil_img, result_pil, blur_radius=blend_radius)
+                # Crop face region, edit only that
+                face_crop, crop_coords = _crop_face_for_edit(pil_img)
+                self._save_debug("00_face_crop", face_crop)
+
+                edited_crop = self._call_nano_banana(face_crop, final_prompt, model)
+                if edited_crop is None:
+                    raise RuntimeError("No image in API response.")
+
+                self._save_debug("01_edited_crop", edited_crop)
+
+                if crop_coords:
+                    result_pil, mask = _paste_crop_back(pil_img, edited_crop, crop_coords, blur_radius=blend_radius)
+                    self._save_debug("01_mask", mask)
+                    self._save_debug("01_composited", result_pil)
+                else:
+                    result_pil = edited_crop
+                    if result_pil.size != original_size:
+                        result_pil = result_pil.resize(original_size, Image.LANCZOS)
+            else:
+                result_pil = self._call_nano_banana(pil_img, final_prompt, model)
+                if result_pil is None:
+                    raise RuntimeError("No image in API response.")
+
+                if result_pil.size != original_size:
+                    result_pil = result_pil.resize(original_size, Image.LANCZOS)
 
         # Handle output quality / resolution
         target_size = QUALITY_OPTIONS.get(output_quality)
