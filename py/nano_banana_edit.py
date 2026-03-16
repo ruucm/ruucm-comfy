@@ -213,7 +213,7 @@ def _crop_eye_region(pil_image, pad_mult=2.0):
     return pil_image.crop((x_min, y_min, x_max, y_max))
 
 
-def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix=""):
+def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix="", save_debug_fn=None):
     """
     Use Gemini text model to compare gaze direction between two images.
     Crops eye region first for better accuracy.
@@ -221,6 +221,11 @@ def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix=""
     """
     source_eyes = _crop_eye_region(source_pil)
     target_eyes = _crop_eye_region(target_pil)
+
+    if save_debug_fn:
+        save_debug_fn(f"{prefix}source_eyes_crop", source_eyes)
+        save_debug_fn(f"{prefix}target_eyes_crop", target_eyes)
+
     source_b64 = _pil_to_base64(source_eyes)
     target_b64 = _pil_to_base64(target_eyes)
 
@@ -507,7 +512,8 @@ class NanoBananaEdit:
             debug_lines.append("--- PRE-EDIT COMPARISON ---")
             if detect_mode == "gemini":
                 needs_edit, target_gaze_desc = _gemini_compare_gaze(
-                    pil_img, target_pil, api_key, debug_lines
+                    pil_img, target_pil, api_key, debug_lines,
+                    prefix="pre_", save_debug_fn=self._save_debug
                 )
             else:
                 needs_edit, target_gaze_desc = _insightface_compare_gaze(
@@ -555,7 +561,8 @@ class NanoBananaEdit:
                 debug_lines.append(f"--- POST-EDIT VERIFY (attempt {attempt}) ---")
                 if detect_mode == "gemini":
                     still_needs_edit, _ = _gemini_compare_gaze(
-                        result_pil, target_pil, api_key, debug_lines, prefix=f"verify_{attempt}_"
+                        result_pil, target_pil, api_key, debug_lines,
+                        prefix=f"verify_{attempt}_", save_debug_fn=self._save_debug
                     )
                 else:
                     still_needs_edit, _ = _insightface_compare_gaze(
