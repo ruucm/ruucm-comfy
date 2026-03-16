@@ -184,8 +184,12 @@ def _insightface_compare_gaze(source_pil, target_pil, gaze_threshold, debug_line
     return needs_edit, target_desc
 
 
-def _crop_eye_region(pil_image, pad_mult=2.0):
-    """Crop the eye region from an image using insightface landmarks. Returns cropped PIL or original if detection fails."""
+def _crop_eye_region(pil_image, pad_mult=1.5):
+    """
+    Crop each eye individually with square-ish padding, then combine side by side.
+    This gives Gemini a much clearer view of iris position than a wide horizontal strip.
+    Returns combined PIL image or original if detection fails.
+    """
     import cv2
 
     app = _get_face_app()
@@ -199,21 +203,27 @@ def _crop_eye_region(pil_image, pad_mult=2.0):
     lm = face.landmark_2d_106
     w, h = pil_image.size
 
-    left_eye_pts = lm[33:43]
-    right_eye_pts = lm[87:97]
-    all_eye_pts = np.vstack([left_eye_pts, right_eye_pts])
+    eye_crops = []
+    for pts in [lm[33:43], lm[87:97]]:
+        x_min, y_min = pts.min(axis=0)
+        x_max, y_max = pts.max(axis=0)
+        ew, eh = x_max - x_min, y_max - y_min
+        pad = max(ew, eh) * pad_mult
+        cx, cy = (x_min + x_max) / 2, (y_min + y_max) / 2
+        x1 = max(0, int(cx - pad))
+        y1 = max(0, int(cy - pad))
+        x2 = min(w, int(cx + pad))
+        y2 = min(h, int(cy + pad))
+        eye_crops.append(pil_image.crop((x1, y1, x2, y2)))
 
-    x_min, y_min = all_eye_pts.min(axis=0)
-    x_max, y_max = all_eye_pts.max(axis=0)
+    # Combine left and right eye side by side
+    w1, h1 = eye_crops[0].size
+    w2, h2 = eye_crops[1].size
+    combined = Image.new("RGB", (w1 + w2 + 10, max(h1, h2)), (255, 255, 255))
+    combined.paste(eye_crops[0], (0, 0))
+    combined.paste(eye_crops[1], (w1 + 10, 0))
 
-    pad_x = (x_max - x_min) * pad_mult
-    pad_y = (y_max - y_min) * pad_mult
-    x_min = max(0, int(x_min - pad_x))
-    y_min = max(0, int(y_min - pad_y))
-    x_max = min(w, int(x_max + pad_x))
-    y_max = min(h, int(y_max + pad_y))
-
-    return pil_image.crop((x_min, y_min, x_max, y_max))
+    return combined
 
 
 def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix="",
