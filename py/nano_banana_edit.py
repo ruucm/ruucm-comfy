@@ -19,7 +19,8 @@ MODELS = {
 COMPARE_MODELS = {
     "gemini-2.5-flash (fast, ~1 won)": "gemini-2.5-flash",
     "gemini-2.5-pro (accurate, ~10 won)": "gemini-2.5-pro",
-    "gemini-3-pro (best, ~15 won)": "gemini-3-pro",
+    "gemini-3-pro-preview (~15 won)": "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview (latest, ~15 won)": "gemini-3.1-pro-preview",
 }
 
 QUALITY_OPTIONS = {
