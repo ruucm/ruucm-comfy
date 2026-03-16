@@ -16,8 +16,11 @@ MODELS = {
     "Nano Banana Pro": "gemini-3-pro-image-preview",
 }
 
-# Cheap text model for gaze comparison
-COMPARE_MODEL = "gemini-2.5-flash"
+COMPARE_MODELS = {
+    "gemini-2.5-flash (fast, ~1 won)": "gemini-2.5-flash",
+    "gemini-2.5-pro (accurate, ~10 won)": "gemini-2.5-pro",
+    "gemini-3-pro (best, ~15 won)": "gemini-3-pro",
+}
 
 QUALITY_OPTIONS = {
     "original": None,
@@ -213,7 +216,8 @@ def _crop_eye_region(pil_image, pad_mult=2.0):
     return pil_image.crop((x_min, y_min, x_max, y_max))
 
 
-def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix="", save_debug_fn=None):
+def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix="",
+                         save_debug_fn=None, compare_model_id="gemini-2.5-flash"):
     """
     Use Gemini text model to compare gaze direction between two images.
     Crops eye region first for better accuracy.
@@ -254,7 +258,7 @@ def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix=""
         },
     }
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{COMPARE_MODEL}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{compare_model_id}:generateContent?key={api_key}"
 
     req = urllib.request.Request(
         url,
@@ -263,7 +267,7 @@ def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix=""
         method="POST",
     )
 
-    print(f"[NanoBananaEdit] Comparing gaze via {COMPARE_MODEL}...")
+    print(f"[NanoBananaEdit] Comparing gaze via {compare_model_id}...")
     resp = urllib.request.urlopen(req, timeout=60)
     result = json.loads(resp.read())
 
@@ -274,7 +278,7 @@ def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix=""
                 text += part["text"]
 
     tag = f"{prefix}detect_mode" if prefix else "detect_mode"
-    debug_lines.append(f"{tag}: gemini ({COMPARE_MODEL})")
+    debug_lines.append(f"{tag}: gemini ({compare_model_id})")
 
     try:
         clean = text.strip()
@@ -388,7 +392,11 @@ class NanoBananaEdit:
                 }),
                 "detect_mode": (list(DETECT_MODES.keys()), {
                     "default": "gemini",
-                    "tooltip": "gemini: use Gemini vision for gaze comparison (accurate, ~1 won). insightface: use local landmarks (free, less accurate).",
+                    "tooltip": "gemini: use Gemini vision for gaze comparison. insightface: use local landmarks (free, less accurate).",
+                }),
+                "compare_model": (list(COMPARE_MODELS.keys()), {
+                    "default": "gemini-2.5-pro (accurate, ~10 won)",
+                    "tooltip": "Model used for gaze comparison. Only used in gemini detect_mode.",
                 }),
                 "gaze_threshold": ("FLOAT", {
                     "default": 0.03,
@@ -488,11 +496,13 @@ class NanoBananaEdit:
                 f.write(text)
 
     def edit(self, image, api_key, model, output_quality, composite_mode, blend_radius,
-             detect_mode, gaze_threshold, max_retries, save_debug, target_image=None, prompt=""):
+             detect_mode, compare_model, gaze_threshold, max_retries, save_debug,
+             target_image=None, prompt=""):
         if not api_key.strip():
             raise ValueError("API key is required. Get one from aistudio.google.com")
 
         self._api_key = api_key
+        self._compare_model_id = COMPARE_MODELS[compare_model]
         self._save_debug_enabled = save_debug
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._debug_session_dir = os.path.join(_DEBUG_DIR, timestamp)
@@ -513,7 +523,8 @@ class NanoBananaEdit:
             if detect_mode == "gemini":
                 needs_edit, target_gaze_desc = _gemini_compare_gaze(
                     pil_img, target_pil, api_key, debug_lines,
-                    prefix="pre_", save_debug_fn=self._save_debug
+                    prefix="pre_", save_debug_fn=self._save_debug,
+                    compare_model_id=self._compare_model_id
                 )
             else:
                 needs_edit, target_gaze_desc = _insightface_compare_gaze(
@@ -562,7 +573,8 @@ class NanoBananaEdit:
                 if detect_mode == "gemini":
                     still_needs_edit, _ = _gemini_compare_gaze(
                         result_pil, target_pil, api_key, debug_lines,
-                        prefix=f"verify_{attempt}_", save_debug_fn=self._save_debug
+                        prefix=f"verify_{attempt}_", save_debug_fn=self._save_debug,
+                        compare_model_id=self._compare_model_id
                     )
                 else:
                     still_needs_edit, _ = _insightface_compare_gaze(
