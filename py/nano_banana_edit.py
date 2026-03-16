@@ -181,13 +181,48 @@ def _insightface_compare_gaze(source_pil, target_pil, gaze_threshold, debug_line
     return needs_edit, target_desc
 
 
+def _crop_eye_region(pil_image, pad_mult=2.0):
+    """Crop the eye region from an image using insightface landmarks. Returns cropped PIL or original if detection fails."""
+    import cv2
+
+    app = _get_face_app()
+    img_cv2 = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    faces = app.get(img_cv2)
+
+    if not faces:
+        return pil_image
+
+    face = faces[0]
+    lm = face.landmark_2d_106
+    w, h = pil_image.size
+
+    left_eye_pts = lm[33:43]
+    right_eye_pts = lm[87:97]
+    all_eye_pts = np.vstack([left_eye_pts, right_eye_pts])
+
+    x_min, y_min = all_eye_pts.min(axis=0)
+    x_max, y_max = all_eye_pts.max(axis=0)
+
+    pad_x = (x_max - x_min) * pad_mult
+    pad_y = (y_max - y_min) * pad_mult
+    x_min = max(0, int(x_min - pad_x))
+    y_min = max(0, int(y_min - pad_y))
+    x_max = min(w, int(x_max + pad_x))
+    y_max = min(h, int(y_max + pad_y))
+
+    return pil_image.crop((x_min, y_min, x_max, y_max))
+
+
 def _gemini_compare_gaze(source_pil, target_pil, api_key, debug_lines, prefix=""):
     """
     Use Gemini text model to compare gaze direction between two images.
+    Crops eye region first for better accuracy.
     Returns (needs_edit: bool, target_gaze_desc: str)
     """
-    source_b64 = _pil_to_base64(source_pil)
-    target_b64 = _pil_to_base64(target_pil)
+    source_eyes = _crop_eye_region(source_pil)
+    target_eyes = _crop_eye_region(target_pil)
+    source_b64 = _pil_to_base64(source_eyes)
+    target_b64 = _pil_to_base64(target_eyes)
 
     compare_prompt = (
         "Look at the eye gaze direction (where the pupils/irises are pointing) in these two photos. "
